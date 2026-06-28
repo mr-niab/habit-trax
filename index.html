@@ -1,0 +1,1588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Habits">
+  <meta name="theme-color" content="#000000">
+  <title>Habit Tracker</title>
+  <link rel="manifest" href="/manifest.json">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; padding: 0; min-height: 100vh; }
+    body {
+      background: radial-gradient(ellipse at 50% 0%, #D1D1D6, #AEAEB2);
+      display: flex; justify-content: center; align-items: flex-start;
+      padding: 40px 20px 80px;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+    }
+    #root { display: flex; justify-content: center; width: 100%; }
+    ::-webkit-scrollbar { display: none; }
+
+    @keyframes fadeUp  { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes shake   { 0%,100% { transform: translateX(0); } 20%,60% { transform: translateX(-9px); } 40%,80% { transform: translateX(9px); } }
+    @keyframes pop     { 0% { transform: scale(0.8); opacity: 0; } 60% { transform: scale(1.08); } 100% { transform: scale(1); opacity: 1; } }
+    .fade-up  { animation: fadeUp  0.22s ease; }
+    .fade-in  { animation: fadeIn  0.3s ease; }
+
+    /* Tap feedback via CSS (avoids JS overhead) */
+    .tap:active { opacity: 0.82 !important; }
+    .tap-bg:active { background: rgba(128,128,128,0.06) !important; }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.3/babel.min.js" crossorigin></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// ── Theme tokens ─────────────────────────────────────────────────────────────
+function th(dark) {
+  return {
+    accent:     dark ? '#5AC88A' : '#4E9B6F',
+    accentBg:   dark ? 'rgba(90,200,138,0.12)'  : 'rgba(78,155,111,0.09)',
+    accentBord: dark ? 'rgba(90,200,138,0.28)'  : 'rgba(78,155,111,0.22)',
+    bg:         dark ? '#000000' : '#F2F2F7',
+    cardBg:     dark ? '#1C1C1E' : '#FFFFFF',
+    card2Bg:    dark ? '#2C2C2E' : '#EFEFEF',
+    text:       dark ? '#FFFFFF' : '#1C1C1E',
+    textSec:    dark ? 'rgba(235,235,245,0.6)'  : 'rgba(60,60,67,0.6)',
+    textTer:    dark ? 'rgba(235,235,245,0.3)'  : 'rgba(60,60,67,0.3)',
+    separator:  dark ? 'rgba(84,84,88,0.65)'    : 'rgba(60,60,67,0.12)',
+    tabBg:      dark ? 'rgba(28,28,30,0.97)'    : 'rgba(255,255,255,0.97)',
+    inactiveT:  dark ? 'rgba(235,235,245,0.4)'  : 'rgba(60,60,67,0.4)',
+    emptyDot:   dark ? '#3A3A3C' : '#E5E5EA',
+  };
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const getTime      = () => new Date().toLocaleTimeString('en-GB',  { hour: '2-digit', minute: '2-digit' });
+const getDateStr   = () => new Date().toLocaleDateString('en-GB',  { weekday: 'long', day: 'numeric', month: 'long' });
+const getGreeting  = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; };
+const getTodayKey  = () => new Date().toISOString().slice(0, 10);
+function getWeekRange() {
+  const t  = new Date(), wd = t.getDay();
+  const mon = new Date(t); mon.setDate(t.getDate() - (wd === 0 ? 6 : wd - 1));
+  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  const fmt = d => d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  return `${fmt(mon)} – ${fmt(sun)}`;
+}
+const dayKey      = (offset = 0) => { const d = new Date(); d.setDate(d.getDate() + offset); return d.toISOString().slice(0, 10); };
+const getYesterdayLabel = () => { const d = new Date(); d.setDate(d.getDate() - 1); return d.toLocaleDateString('en-GB', { weekday: 'long' }); };
+const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
+// ── Feeling scale (1–5) ─────────────────────────────────────────────────────────
+// 1 = not good · 5 = really good. Stored per habit as a number; averaged into a daily score.
+const FEELINGS = [
+  { score: 1, emoji: '😣', label: 'Not good', color: '#FF3B30' },
+  { score: 2, emoji: '😕', label: 'Low',      color: '#FF9F0A' },
+  { score: 3, emoji: '😐', label: 'Okay',     color: '#FFD60A' },
+  { score: 4, emoji: '🙂', label: 'Good',     color: '#5AC88A' },
+  { score: 5, emoji: '😄', label: 'Great',    color: '#34C759' },
+];
+const feelOf = s => FEELINGS.find(f => f.score === s) || null;
+function dailyScore(emotions) {
+  const vals = Object.values(emotions || {}).filter(v => typeof v === 'number' && v >= 1 && v <= 5);
+  if (!vals.length) return null;
+  return Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10;
+}
+const scoreColor = avg => avg == null ? null : feelOf(Math.round(avg)).color;
+const scoreEmoji = avg => avg == null ? '🫥' : feelOf(Math.round(avg)).emoji;
+
+// ── Time of day ───────────────────────────────────────────────────────────────
+const PERIODS = [
+  { key: 'morning',   label: 'Morning',   sub: 'Start your day',   emoji: '🌅' },
+  { key: 'afternoon', label: 'Afternoon', sub: 'Keep it going',    emoji: '☀️' },
+  { key: 'evening',   label: 'Evening',   sub: 'Wind down',        emoji: '🌙' },
+];
+
+// ── Built-in habits (fasting-aware) ────────────────────────────────────────────
+function builtIns(fasting) {
+  const morning = fasting
+    ? { id: 'fasting',   title: 'Held fasting window', subtitle: 'No breakfast — by choice', time: 'morning', tappable: true,  done: h => !!h.fasting,         right: h => h.fasting ? 'Done' : 'Tap' }
+    : { id: 'breakfast', title: 'Breakfast',           subtitle: 'Avoid skipping the first meal', time: 'morning', tappable: true,  done: h => !!h.breakfast,       right: h => h.breakfast ? 'Done' : 'Tap' };
+  return [
+    morning,
+    { id: 'brokeUpSitting',  title: 'Broke up sitting',       subtitle: 'Regular movement breaks',  time: 'morning',   tappable: true,  done: h => !!h.brokeUpSitting,   right: h => h.brokeUpSitting ? 'Done' : 'Tap' },
+    { id: 'fruitVeg',        title: 'Fruit & veg with meals', subtitle: 'Logged via meals · today', time: 'afternoon', tappable: false, done: h => h.fruitVeg >= 2,      right: h => `${h.fruitVeg}/2` },
+    { id: 'activity',        title: '30 min activity',        subtitle: 'From Apple Health · auto', time: 'afternoon', tappable: false, done: h => h.activity >= 30,     right: h => `${h.activity} min` },
+    { id: 'noFoodBeforeBed', title: 'No food 3h before sleep',subtitle: 'Better sleep quality',     time: 'evening',   tappable: true,  done: h => !!h.noFoodBeforeBed,  right: h => h.noFoodBeforeBed ? 'Done' : 'Tap' },
+    { id: 'noNightSnacking', title: 'No night snacking',      subtitle: 'After dinner',             time: 'evening',   tappable: true,  done: h => !!h.noNightSnacking,  right: h => h.noNightSnacking ? 'Done' : 'Tap' },
+  ];
+}
+
+// ── Habit library (100, by time of day) — searchable in quick-log ─────────────
+const LIBRARY = {
+  morning: [
+    'Wake at a consistent time','Make your bed','Drink a glass of water','No phone for first 30 minutes',
+    'Morning meditation','Gratitude journaling','Write morning pages','Daily affirmations',
+    "Review today's goals",'Plan your day / to-do list','Review your calendar','Exercise / workout',
+    'Morning run','Yoga','Stretching','Cold shower','Skincare routine','Brush teeth','Floss',
+    'Take vitamins / supplements','Healthy breakfast','Eat protein at breakfast','Avoid sugar at breakfast',
+    'Mindful coffee or tea','Get natural sunlight','Walk outside','Read non-fiction','Listen to a podcast',
+    'Language practice','Deep breathing exercise','Prayer / spiritual practice','Weigh yourself',
+    'Review budget or finances','Prep lunch in advance','Review long-term goals',
+    "Write one thing you're looking forward to",'Limit news in the morning','Take a progress photo',
+    'Practise a musical instrument','Set a daily intention',
+  ],
+  afternoon: [
+    'Take a proper lunch break','Eat a healthy lunch','Drink water regularly','Avoid processed snacks',
+    'Eat a healthy snack','Midday walk','Stand up from your desk','Midday stretch','Power nap (10–20 mins)',
+    'Deep work session (no distractions)','Batch process emails','Limit social media','Single-task focus',
+    'Review morning intentions','Learn something new','Practise a skill','Creative time','Tidy your workspace',
+    'Connect with a friend or colleague','Check in on a personal project','Afternoon breathing exercise',
+    'Practise mindfulness','No caffeine after 2pm','Step outside briefly','Read an article or chapter',
+    'Limit alcohol with lunch','Network or reach out to someone','Reflect on morning progress',
+    'Write in a work journal','Celebrate a small win',
+  ],
+  evening: [
+    'Cook a healthy dinner','Eat dinner with family / partner','Limit alcohol in the evening',
+    'Stop eating 2–3 hours before bed','Avoid screens 1 hour before bed','Dim lights in the evening',
+    'Evening walk','Light yoga or stretching','Evening meditation','Evening skincare routine',
+    'Shower or bath before bed','Herbal tea','Read fiction before bed','Gratitude journal',
+    'Reflect on the day',"Write tomorrow's to-do list","Set tomorrow's intention",
+    'Prepare clothes for tomorrow','Tidy or declutter a room','No work emails after a set time',
+    'Connect with a loved one','Express appreciation to someone','Practise a relaxation technique',
+    'Listen to calming music','Limit news in the evening','Set your alarm','Consistent bedtime',
+    'Track sleep','Leave your phone outside the bedroom','Write one accomplishment from the day',
+  ],
+};
+const LIBRARY_FLAT = Object.entries(LIBRARY).flatMap(([time, arr]) =>
+  arr.map(title => ({ id: 'lib_' + slug(title), title, time }))
+);
+
+// ── Local persistence for per-day habit state (offline + follow-up support) ────
+function loadLocalHabits(date) {
+  try { return JSON.parse(localStorage.getItem('ht_habits_' + date) || 'null'); }
+  catch (_) { return null; }
+}
+function saveLocalHabits(date, h) {
+  try { localStorage.setItem('ht_habits_' + date, JSON.stringify(h)); } catch (_) {}
+}
+
+// ── Shared: Check icon ────────────────────────────────────────────────────────
+const Check = () => (
+  <svg width="13" height="10" viewBox="0 0 13 10" fill="none">
+    <path d="M1.5 5L5 8.5 11.5 1.5" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>
+);
+
+// ── Shared: Chevron ───────────────────────────────────────────────────────────
+const Chevron = ({ color }) => (
+  <svg width="8" height="14" viewBox="0 0 8 14" fill="none">
+    <path d="M1 1l6 6-6 6" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>
+);
+
+// ── Shared: Toggle ────────────────────────────────────────────────────────────
+function Toggle({ on, onToggle, accent, separator }) {
+  return (
+    <div onClick={onToggle} style={{
+      width: 51, height: 31, borderRadius: 16,
+      background: on ? accent : separator,
+      position: 'relative', cursor: 'pointer',
+      transition: 'background 0.2s', flexShrink: 0,
+    }}>
+      <div style={{
+        width: 27, height: 27, borderRadius: '50%', background: 'white',
+        position: 'absolute', top: 2, left: on ? 22 : 2,
+        transition: 'left 0.2s', boxShadow: '0 2px 5px rgba(0,0,0,0.22)',
+      }} />
+    </div>
+  );
+}
+
+// ── Shared: Feeling picker (1–5) ───────────────────────────────────────────────
+function FeelingPicker({ t, value, onPick }) {
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {FEELINGS.map(f => {
+          const on = value === f.score;
+          return (
+            <div key={f.score} onClick={() => onPick(f.score)} className="tap" style={{
+              flex: 1, padding: '12px 2px', borderRadius: 16, textAlign: 'center', cursor: 'pointer',
+              background: on ? f.color : t.card2Bg, transition: 'background 0.15s, transform 0.1s',
+              transform: on ? 'scale(1.05)' : 'none',
+            }}>
+              <div style={{ fontSize: 25, lineHeight: 1 }}>{f.emoji}</div>
+              <div style={{ fontSize: 16, fontWeight: 800, marginTop: 5, color: on ? '#fff' : t.text, letterSpacing: -0.3 }}>{f.score}</div>
+              <div style={{ fontSize: 9, fontWeight: 600, marginTop: 1, color: on ? '#fff' : t.textSec }}>{f.label}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, padding: '0 2px', fontSize: 11, color: t.textTer }}>
+        <span>1 · not good</span><span>5 · really good</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Shared: HabitRow ──────────────────────────────────────────────────────────
+function HabitRow({ done, onToggle, title, subtitle, rightLabel, isLast, t, tappable = true, emotion }) {
+  const feel = (typeof emotion === 'number') ? feelOf(emotion) : null;
+  return (
+    <div
+      onClick={tappable ? onToggle : undefined}
+      className={tappable ? 'tap-bg' : ''}
+      style={{
+        display: 'flex', alignItems: 'center', padding: '14px 16px', gap: 12,
+        cursor: tappable ? 'pointer' : 'default',
+        borderBottom: isLast ? 'none' : `0.5px solid ${t.separator}`,
+      }}
+    >
+      <div style={{
+        width: 28, height: 28, borderRadius: '50%',
+        background: done ? t.accent : 'transparent',
+        border: `2px solid ${done ? t.accent : t.separator}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0, transition: 'background 0.2s, border-color 0.2s',
+      }}>
+        {done && <Check />}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: t.text }}>{title}</div>
+        <div style={{ fontSize: 12, color: t.textSec, marginTop: 1 }}>{subtitle}</div>
+      </div>
+      {feel && (
+        <span style={{ fontSize: 14, fontWeight: 700, color: feel.color, flexShrink: 0 }} title={`Felt ${feel.label}`}>{feel.emoji} {feel.score}</span>
+      )}
+      <div style={{ fontSize: 13, fontWeight: 500, color: done ? t.accent : t.textTer, flexShrink: 0 }}>{rightLabel}</div>
+    </div>
+  );
+}
+
+// ── IOSDevice frame ───────────────────────────────────────────────────────────
+function IOSDevice({ children, dark }) {
+  const t = th(dark);
+  return (
+    <div style={{
+      width: 402, height: 874, borderRadius: 48, overflow: 'hidden',
+      position: 'relative', background: t.bg, flexShrink: 0,
+      boxShadow: '0 40px 80px rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.12)',
+    }}>
+      {/* Dynamic Island */}
+      <div style={{
+        position: 'absolute', top: 11, left: '50%', transform: 'translateX(-50%)',
+        width: 126, height: 37, borderRadius: 24, background: '#000', zIndex: 50, pointerEvents: 'none',
+      }} />
+      {/* Home indicator */}
+      <div style={{
+        position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 60,
+        height: 34, display: 'flex', justifyContent: 'center', alignItems: 'flex-end',
+        paddingBottom: 8, pointerEvents: 'none',
+      }}>
+        <div style={{ width: 139, height: 5, borderRadius: 100, background: dark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.25)' }} />
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ── Bottom sheet: Feeling picker (row tap / yesterday follow-up) ──────────────
+// Tapping a feeling saves immediately (keeps logging to a minimum of taps).
+function FeelingSheet({ t, sheet, onClose, onSave }) {
+  if (!sheet) return null;
+  const followUp = sheet.mode === 'followup';
+  const heading  = followUp ? 'How do you feel today?' : 'How do you feel?';
+  const caption  = followUp
+    ? `Yesterday you did “${sheet.title}”. How do you feel today as a result?`
+    : `After “${sheet.title}”`;
+
+  return (
+    <div className="fade-in" onClick={onClose} style={{
+      position: 'absolute', inset: 0, zIndex: 90, borderRadius: 48, overflow: 'hidden',
+      background: 'rgba(0,0,0,0.35)', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: t.cardBg, borderRadius: '24px 24px 0 0', padding: '10px 16px 30px',
+        animation: 'fadeUp 0.25s ease',
+      }}>
+        <div style={{ width: 38, height: 5, borderRadius: 3, background: t.separator, margin: '0 auto 16px' }} />
+        <div style={{ fontSize: 21, fontWeight: 700, color: t.text, letterSpacing: -0.4, textAlign: 'center' }}>{heading}</div>
+        <div style={{ fontSize: 14, color: t.textSec, marginTop: 5, textAlign: 'center', lineHeight: 1.4, padding: '0 8px' }}>{caption}</div>
+
+        <div style={{ marginTop: 22, marginBottom: 10 }}>
+          <FeelingPicker t={t} value={sheet.current || null} onPick={onSave} />
+        </div>
+
+        <div onClick={onClose} className="tap" style={{
+          padding: '13px', textAlign: 'center', fontSize: 16, fontWeight: 500, color: t.textSec, cursor: 'pointer', marginTop: 6,
+        }}>Cancel</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Bottom sheet: Quick-log (add ▸ select ▸ log) ──────────────────────────────
+function QuickLogSheet({ t, open, onClose, activeHabits, onLog, onCreate }) {
+  const [step, setStep]   = useState('select');   // 'select' | 'feel'
+  const [query, setQuery] = useState('');
+  const [pending, setPending] = useState(null);   // { id, title, time, persist }
+
+  useEffect(() => {
+    if (open) { setStep('select'); setQuery(''); setPending(null); }
+  }, [open]);
+
+  if (!open) return null;
+
+  const q = query.trim().toLowerCase();
+  const activeIds = new Set(activeHabits.map(h => h.id));
+  const activeTitles = new Set(activeHabits.map(h => h.title.toLowerCase()));
+
+  const filteredActive = q
+    ? activeHabits.filter(h => h.title.toLowerCase().includes(q))
+    : activeHabits;
+
+  const libMatches = q
+    ? LIBRARY_FLAT
+        .filter(l => l.title.toLowerCase().includes(q) && !activeIds.has(l.id) && !activeTitles.has(l.title.toLowerCase()))
+        .slice(0, 14)
+    : [];
+
+  const exactExists = q && (
+    activeTitles.has(q) || LIBRARY_FLAT.some(l => l.title.toLowerCase() === q)
+  );
+
+  function pick(item, persist) {
+    setPending({ ...item, persist: !!persist });
+    setStep('feel');
+  }
+
+  function createNew() {
+    const title = query.trim();
+    if (!title) return;
+    const item = { id: 'custom_' + Math.random().toString(36).slice(2, 9), title, time: 'morning' };
+    onCreate(item);
+    pick(item, false); // already created/persisted by onCreate
+  }
+
+  const Row = ({ onClick, title, sub, leftEmoji, done }) => (
+    <div onClick={onClick} className="tap-bg" style={{
+      display: 'flex', alignItems: 'center', padding: '13px 16px', gap: 12, cursor: 'pointer',
+      borderBottom: `0.5px solid ${t.separator}`,
+    }}>
+      <div style={{
+        width: 30, height: 30, borderRadius: '50%', flexShrink: 0,
+        background: done ? t.accent : t.card2Bg, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 15,
+      }}>{done ? <Check /> : (leftEmoji || '')}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: t.text }}>{title}</div>
+        {sub && <div style={{ fontSize: 12, color: t.textSec, marginTop: 1 }}>{sub}</div>}
+      </div>
+      <Chevron color={t.textTer} />
+    </div>
+  );
+
+  return (
+    <div className="fade-in" onClick={onClose} style={{
+      position: 'absolute', inset: 0, zIndex: 95, borderRadius: 48, overflow: 'hidden',
+      background: 'rgba(0,0,0,0.35)', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: t.cardBg, borderRadius: '24px 24px 0 0', padding: '10px 0 26px',
+        animation: 'fadeUp 0.25s ease', maxHeight: '82%', display: 'flex', flexDirection: 'column',
+      }}>
+        <div style={{ width: 38, height: 5, borderRadius: 3, background: t.separator, margin: '0 auto 14px', flexShrink: 0 }} />
+
+        {step === 'select' && (
+          <>
+            <div style={{ padding: '0 16px', flexShrink: 0 }}>
+              <div style={{ fontSize: 21, fontWeight: 700, color: t.text, letterSpacing: -0.4, textAlign: 'center' }}>Log a habit</div>
+              <div style={{ fontSize: 13, color: t.textSec, marginTop: 4, textAlign: 'center' }}>Pick one, then say how you feel</div>
+              <input
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder="Search your habits or 100+ more…"
+                autoFocus
+                style={{
+                  width: '100%', marginTop: 14, padding: '12px 16px', background: t.card2Bg,
+                  border: 'none', borderRadius: 12, fontSize: 16, color: t.text,
+                  fontFamily: '-apple-system, system-ui', outline: 'none', WebkitAppearance: 'none',
+                }}
+              />
+            </div>
+
+            <div style={{ overflowY: 'auto', WebkitOverflowScrolling: 'touch', marginTop: 14, flex: 1 }}>
+              {/* Your habits */}
+              {filteredActive.length > 0 && (
+                <>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, padding: '0 16px 6px' }}>Your habits</div>
+                  {filteredActive.map(h => (
+                    <Row key={h.id} onClick={() => pick(h, false)} title={h.title}
+                      sub={h.done ? 'Logged today · tap to update' : (h.subtitle || PERIODS.find(p => p.key === h.time)?.label)}
+                      done={h.done} />
+                  ))}
+                </>
+              )}
+
+              {/* Library matches */}
+              {libMatches.length > 0 && (
+                <>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, padding: '14px 16px 6px' }}>From the habit library</div>
+                  {libMatches.map(l => (
+                    <Row key={l.id} onClick={() => pick(l, true)} title={l.title}
+                      sub={PERIODS.find(p => p.key === l.time)?.label} leftEmoji="＋" />
+                  ))}
+                </>
+              )}
+
+              {/* Create new */}
+              {q && !exactExists && (
+                <div onClick={createNew} className="tap-bg" style={{
+                  display: 'flex', alignItems: 'center', padding: '15px 16px', gap: 12, cursor: 'pointer', marginTop: 6,
+                }}>
+                  <div style={{
+                    width: 30, height: 30, borderRadius: '50%', flexShrink: 0, background: t.accentBg,
+                    border: `1.5px dashed ${t.accent}`, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <svg width="13" height="13" viewBox="0 0 12 12" fill="none"><path d="M6 1v10M1 6h10" stroke={t.accent} strokeWidth="2" strokeLinecap="round"/></svg>
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: 600, color: t.accent }}>Create “{query.trim()}”</div>
+                </div>
+              )}
+
+              {!q && (
+                <div style={{ fontSize: 12, color: t.textTer, textAlign: 'center', padding: '16px' }}>
+                  Type to search 100+ ready-made habits, or create your own.
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {step === 'feel' && pending && (
+          <div style={{ padding: '0 16px' }}>
+            <div style={{ fontSize: 21, fontWeight: 700, color: t.text, letterSpacing: -0.4, textAlign: 'center' }}>How do you feel?</div>
+            <div style={{ fontSize: 14, color: t.textSec, marginTop: 5, textAlign: 'center', lineHeight: 1.4 }}>After “{pending.title}”</div>
+            <div style={{ marginTop: 22, marginBottom: 6 }}>
+              <FeelingPicker t={t} value={null} onPick={score => onLog(pending, score)} />
+            </div>
+            <div onClick={() => setStep('select')} className="tap" style={{
+              padding: '13px', textAlign: 'center', fontSize: 16, fontWeight: 500, color: t.textSec, cursor: 'pointer', marginTop: 8,
+            }}>Back</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Card: Yesterday follow-up ─────────────────────────────────────────────────
+function FollowUpCard({ t, items, followUp, onPick }) {
+  const pending = items.filter(it => !followUp[it.id]).length;
+  if (items.length === 0) return null;
+
+  return (
+    <div style={{ padding: '22px 16px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontSize: 20, fontWeight: 700, color: t.text, letterSpacing: -0.4 }}>Follow-up</div>
+        <div style={{ fontSize: 13, color: t.textSec }}>{getYesterdayLabel()}</div>
+      </div>
+      <div style={{ fontSize: 13, color: t.textSec, marginBottom: 10, lineHeight: 1.4 }}>
+        {pending > 0 ? 'Did yesterday’s habits make a difference? Log how you feel today.' : 'All caught up — thanks for reflecting.'}
+      </div>
+      <div style={{ background: t.cardBg, borderRadius: 20, overflow: 'hidden' }}>
+        {items.map((it, i) => {
+          const feel = (typeof followUp[it.id] === 'number') ? feelOf(followUp[it.id]) : null;
+          return (
+            <div key={it.id} onClick={() => onPick(it)} className="tap-bg" style={{
+              display: 'flex', alignItems: 'center', padding: '14px 16px', gap: 12, cursor: 'pointer',
+              borderBottom: i < items.length - 1 ? `0.5px solid ${t.separator}` : 'none',
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 16, fontWeight: 500, color: t.text }}>{it.title}</div>
+                <div style={{ fontSize: 12, color: t.textSec, marginTop: 1 }}>
+                  {feel ? `You feel ${feel.label.toLowerCase()} today` : 'How do you feel today?'}
+                </div>
+              </div>
+              {feel
+                ? <span style={{ fontSize: 14, fontWeight: 700, color: feel.color, flexShrink: 0 }}>{feel.emoji} {feel.score}</span>
+                : <Chevron color={t.textTer} />}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Card: Daily feeling score ─────────────────────────────────────────────────
+function DailyScoreCard({ t, score, count }) {
+  const has = score != null;
+  const col = has ? scoreColor(score) : t.textTer;
+  return (
+    <div style={{ padding: '16px 16px 0' }}>
+      <div style={{ background: t.cardBg, borderRadius: 20, padding: '16px', display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{
+          width: 64, height: 64, borderRadius: '50%', flexShrink: 0,
+          background: has ? col : t.card2Bg, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{ fontSize: 22, fontWeight: 800, color: has ? '#fff' : t.textTer, lineHeight: 1, letterSpacing: -0.5 }}>{has ? score : '—'}</div>
+          <div style={{ fontSize: 9, fontWeight: 600, color: has ? 'rgba(255,255,255,0.85)' : t.textTer, marginTop: 1 }}>/ 5</div>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: t.textSec, letterSpacing: 0.4, textTransform: 'uppercase' }}>How you feel today {scoreEmoji(score)}</div>
+          <div style={{ fontSize: 15, color: t.text, marginTop: 4, lineHeight: 1.35 }}>
+            {has
+              ? `Average across ${count} habit${count === 1 ? '' : 's'} logged today.`
+              : 'Log a habit and rate how you feel to build today’s score.'}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Screen: Home ──────────────────────────────────────────────────────────────
+function HomeScreen({ t, habits, builtInList, onHabitTap, greeting, dateStr, weekRange, onQuickLog, onLogMeal, onLogSnack, onWeekly, showSaved, customHabits, onAddHabit, emotions, followUpItems, followUp, onFollowUpPick, score, scoreCount }) {
+  const allHabits = [
+    ...builtInList.map(b => ({
+      id: b.id, title: b.title, subtitle: b.subtitle, time: b.time,
+      tappable: b.tappable, done: b.done(habits), right: b.right(habits),
+    })),
+    ...customHabits.map(h => ({
+      id: h.id, title: h.title, subtitle: h.subtitle || 'Tap to log how you feel',
+      time: h.time || 'morning', tappable: true, done: !!habits[h.id],
+      right: habits[h.id] ? 'Done' : 'Tap',
+    })),
+  ];
+  const done  = allHabits.filter(h => h.done).length;
+  const total = allHabits.length;
+  const pct   = Math.round(done / total * 100) + '%';
+
+  return (
+    <div className="fade-up" style={{ paddingBottom: 20 }}>
+      {showSaved && (
+        <div style={{ margin: '12px 16px 0', padding: '13px 16px', background: t.accent, borderRadius: 14, display: 'flex', alignItems: 'center', gap: 10, animation: 'fadeUp 0.2s' }}>
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="rgba(255,255,255,0.2)"/><path d="M5.5 10l3 3 6-6" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          <span style={{ fontSize: 15, fontWeight: 500, color: '#fff' }}>Logged — nice one!</span>
+        </div>
+      )}
+
+      {/* Greeting */}
+      <div style={{ padding: '20px 16px 0' }}>
+        <div style={{ fontSize: 28, fontWeight: 700, color: t.text, letterSpacing: -0.5, lineHeight: 1.15 }}>{greeting}</div>
+        <div style={{ fontSize: 15, color: t.textSec, marginTop: 3 }}>{dateStr}</div>
+      </div>
+
+      {/* Primary action: Log a habit */}
+      <div style={{ padding: '18px 16px 0' }}>
+        <div onClick={onQuickLog} className="tap" style={{
+          background: t.accent, borderRadius: 18, padding: '18px 18px', cursor: 'pointer',
+          display: 'flex', alignItems: 'center', gap: 14,
+          boxShadow: '0 8px 20px rgba(78,155,111,0.28)',
+        }}>
+          <div style={{ width: 42, height: 42, borderRadius: 13, background: 'rgba(255,255,255,0.22)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v16M3 11h16" stroke="#fff" strokeWidth="2.4" strokeLinecap="round"/></svg>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#fff', letterSpacing: -0.3 }}>Log a habit</div>
+            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.82)', marginTop: 2 }}>Add ▸ select ▸ rate how you feel</div>
+          </div>
+          <Chevron color="rgba(255,255,255,0.85)" />
+        </div>
+      </div>
+
+      {/* Daily feeling score */}
+      <DailyScoreCard t={t} score={score} count={scoreCount} />
+
+      {/* Today's progress */}
+      <div style={{ padding: '20px 16px 0' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: t.text, letterSpacing: -0.4 }}>Today</div>
+          <div style={{ fontSize: 15, color: t.textSec }}>{done}/{total}</div>
+        </div>
+        <div style={{ height: 5, background: t.separator, borderRadius: 3, overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: pct, background: t.accent, borderRadius: 3, transition: 'width 0.4s ease' }} />
+        </div>
+      </div>
+
+      {/* Habits grouped by time of day */}
+      {PERIODS.map(p => {
+        const rows = allHabits.filter(h => h.time === p.key);
+        return (
+          <div key={p.key} style={{ padding: '18px 16px 0' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 9, paddingLeft: 4 }}>
+              <span style={{ fontSize: 16 }}>{p.emoji}</span>
+              <span style={{ fontSize: 16, fontWeight: 700, color: t.text, letterSpacing: -0.3 }}>{p.label}</span>
+              <span style={{ fontSize: 13, color: t.textTer }}>· {p.sub}</span>
+            </div>
+            <div style={{ background: t.cardBg, borderRadius: 20, overflow: 'hidden' }}>
+              {rows.map(h => (
+                <HabitRow key={h.id} done={h.done} tappable={h.tappable}
+                  onToggle={() => onHabitTap(h)} title={h.title} subtitle={h.subtitle}
+                  rightLabel={h.right} emotion={emotions[h.id]} t={t} />
+              ))}
+              {/* Add habit to this period */}
+              <div onClick={() => onAddHabit(p.key)} className="tap-bg" style={{ display: 'flex', alignItems: 'center', padding: '13px 16px', gap: 12, cursor: 'pointer' }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+                  border: `2px dashed ${t.textTer}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                    <path d="M6 1v10M1 6h10" stroke={t.textTer} strokeWidth="2" strokeLinecap="round"/>
+                  </svg>
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 500, color: t.textTer }}>Add {p.label.toLowerCase()} habit</div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Yesterday follow-up */}
+      <FollowUpCard t={t} items={followUpItems} followUp={followUp} onPick={onFollowUpPick} />
+
+      {/* Food & snacks (secondary to habits) */}
+      <div style={{ padding: '22px 16px 0' }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: t.text, letterSpacing: -0.3, marginBottom: 9, paddingLeft: 4 }}>Food & snacks</div>
+        <div style={{ background: t.cardBg, borderRadius: 20, overflow: 'hidden' }}>
+          <div onClick={onLogMeal} className="tap-bg" style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', gap: 12, cursor: 'pointer', borderBottom: `0.5px solid ${t.separator}` }}>
+            <svg width="22" height="22" viewBox="0 0 26 26" fill="none" stroke={t.accent} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M5 3v7a8 8 0 0 0 16 0V3"/><line x1="13" y1="3" x2="13" y2="10"/><line x1="9" y1="3" x2="9" y2="7"/><line x1="17" y1="3" x2="17" y2="7"/><path d="M8 23h10"/>
+            </svg>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 16, fontWeight: 500, color: t.text }}>Log a meal</div>
+              <div style={{ fontSize: 12, color: t.textSec, marginTop: 1 }}>Breakfast · Lunch · Dinner</div>
+            </div>
+            <Chevron color={t.textTer} />
+          </div>
+          <div onClick={onLogSnack} className="tap-bg" style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', gap: 12, cursor: 'pointer' }}>
+            <svg width="22" height="22" viewBox="0 0 26 26" fill="none" stroke={t.accent} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M13 3C8.03 3 4 7.03 4 12c0 3.36 1.83 6.3 4.56 7.9V22h8.88v-2.1C20.17 18.3 22 15.36 22 12c0-4.97-4.03-9-9-9z"/>
+              <line x1="10" y1="18" x2="10" y2="22"/><line x1="16" y1="18" x2="16" y2="22"/>
+            </svg>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 16, fontWeight: 500, color: t.text }}>Log a snack</div>
+              <div style={{ fontSize: 12, color: t.textSec, marginTop: 1 }}>Between meals</div>
+            </div>
+            <Chevron color={t.textTer} />
+          </div>
+        </div>
+      </div>
+
+      {/* Apple Health card */}
+      <div style={{ padding: '14px 16px 0' }}>
+        <div style={{ background: t.cardBg, borderRadius: 20, padding: 16, display: 'flex', alignItems: 'center', gap: 16 }}>
+          <svg width="54" height="54" viewBox="0 0 54 54">
+            <circle cx="27" cy="27" r="23" fill="none" stroke={t.bg}    strokeWidth="5.5"/>
+            <circle cx="27" cy="27" r="23" fill="none" stroke="#FF2D55" strokeWidth="5.5" strokeDasharray={`${Math.min(144.5, (habits.activity / 60) * 144.5)} 144.5`} strokeLinecap="round" transform="rotate(-90 27 27)"/>
+            <circle cx="27" cy="27" r="15" fill="none" stroke={t.bg}    strokeWidth="5"/>
+            <circle cx="27" cy="27" r="15" fill="none" stroke="#30D158" strokeWidth="5"   strokeDasharray="70.7 94.2" strokeLinecap="round" transform="rotate(-90 27 27)"/>
+          </svg>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#FF2D55', letterSpacing: 0.5, marginBottom: 8 }}>APPLE HEALTH</div>
+            <div style={{ display: 'flex', gap: 18 }}>
+              <div>
+                <div style={{ fontSize: 19, fontWeight: 700, color: t.text, letterSpacing: -0.4, lineHeight: 1 }}>
+                  {habits.activity}<span style={{ fontSize: 11, fontWeight: 500, color: t.textSec }}> min</span>
+                </div>
+                <div style={{ fontSize: 11, color: t.textSec, marginTop: 2 }}>Active</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 19, fontWeight: 700, color: t.text, letterSpacing: -0.4, lineHeight: 1 }}>{habits.steps || '—'}</div>
+                <div style={{ fontSize: 11, color: t.textSec, marginTop: 2 }}>Steps</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 19, fontWeight: 700, color: t.text, letterSpacing: -0.4, lineHeight: 1 }}>{habits.kcal || '—'}</div>
+                <div style={{ fontSize: 11, color: t.textSec, marginTop: 2 }}>Kcal</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Week prompt */}
+      <div style={{ padding: '14px 16px 0' }}>
+        <div onClick={onWeekly} className="tap" style={{ background: t.accentBg, border: `1px solid ${t.accentBord}`, borderRadius: 16, padding: '14px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: t.accent }}>This week · {weekRange}</div>
+            <div style={{ fontSize: 13, color: t.textSec, marginTop: 2 }}>Weekly AI review ready</div>
+          </div>
+          <Chevron color={t.accent} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Screen: Log entry ─────────────────────────────────────────────────────────
+function LogScreen({ t, logType, logForm, setLogForm, onBack, onSave, time }) {
+  const isMeal = logType === 'meal';
+  const sel    = logForm.mealType;
+  const qual   = logForm.quality;
+
+  const segBg = opt => sel === opt ? t.cardBg : 'transparent';
+  const segTx = opt => sel === opt ? t.text   : t.textSec;
+  const segSh = opt => sel === opt ? '0 1px 3px rgba(0,0,0,0.1)' : 'none';
+
+  const qBg = q => qual === q ? (q === 'light' ? '#34C759' : q === 'heavy' ? '#FF9F0A' : t.accent) : t.card2Bg;
+  const qTx = q => qual === q ? '#fff' : t.textSec;
+
+  const mealOpts  = [['breakfast','Breakfast'],['lunch','Lunch'],['dinner','Dinner'],['other','Other']];
+  const snackOpts = [['morning','Morning'],['afternoon','Afternoon'],['evening','Evening']];
+  const opts = isMeal ? mealOpts : snackOpts;
+
+  return (
+    <div className="fade-up" style={{ paddingBottom: 28 }}>
+      {/* Nav */}
+      <div style={{ display: 'flex', alignItems: 'center', padding: '10px 16px', borderBottom: `0.5px solid ${t.separator}` }}>
+        <div onClick={onBack} className="tap" style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.accent, cursor: 'pointer', minWidth: 70 }}>
+          <svg width="10" height="18" viewBox="0 0 10 18" fill="none"><path d="M9 1L1.5 9 9 17" stroke={t.accent} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          <span style={{ fontSize: 17 }}>Back</span>
+        </div>
+        <div style={{ flex: 1, textAlign: 'center', fontSize: 17, fontWeight: 600, color: t.text, letterSpacing: -0.3 }}>
+          {isMeal ? 'Log a Meal' : 'Log a Snack'}
+        </div>
+        <div style={{ minWidth: 70 }} />
+      </div>
+
+      <div style={{ padding: '18px 16px 0' }}>
+        {/* Time row */}
+        <div style={{ background: t.cardBg, borderRadius: 14, padding: '14px 16px', marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 16, fontWeight: 500, color: t.text }}>Time</span>
+          <span style={{ fontSize: 16, color: t.textSec }}>{time}</span>
+        </div>
+
+        {/* Type / When selector */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+            {isMeal ? 'Meal' : 'When'}
+          </div>
+          <div style={{ background: t.card2Bg, borderRadius: 12, padding: 3, display: 'flex', gap: 2 }}>
+            {opts.map(([val, label]) => (
+              <div key={val} onClick={() => setLogForm(f => ({ ...f, mealType: val }))} style={{
+                flex: 1, padding: '9px 4px', borderRadius: 9, textAlign: 'center',
+                fontSize: 14, fontWeight: 500, background: segBg(val), color: segTx(val),
+                cursor: 'pointer', boxShadow: segSh(val), transition: 'background 0.15s',
+              }}>{label}</div>
+            ))}
+          </div>
+        </div>
+
+        {/* Quality */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>How was it?</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[['light','Light','salad, soup'],['balanced','Balanced','normal meal'],['heavy','Heavy','large portion']].map(([val, label, sub]) => (
+              <div key={val} onClick={() => setLogForm(f => ({ ...f, quality: val }))} style={{
+                flex: 1, padding: '14px 8px', borderRadius: 14, textAlign: 'center',
+                fontSize: 14, fontWeight: 500, background: qBg(val), color: qTx(val),
+                cursor: 'pointer', transition: 'background 0.15s', lineHeight: 1.3,
+              }}>
+                {label}<br/><span style={{ fontSize: 11, opacity: 0.75 }}>{sub}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Fruit/veg toggle */}
+        <div style={{ background: t.cardBg, borderRadius: 14, padding: '14px 16px', marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 500, color: t.text }}>Fruit or veg included?</div>
+            <div style={{ fontSize: 13, color: t.textSec, marginTop: 2 }}>Counts towards your daily target</div>
+          </div>
+          <Toggle on={logForm.fruitVeg} onToggle={() => setLogForm(f => ({ ...f, fruitVeg: !f.fruitVeg }))} accent={t.accent} separator={t.separator} />
+        </div>
+
+        {/* Notes */}
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Notes (optional)</div>
+          <textarea
+            value={logForm.notes || ''}
+            onChange={e => setLogForm(f => ({ ...f, notes: e.target.value }))}
+            placeholder="Anything to add?"
+            style={{
+              width: '100%', padding: '13px 16px', background: t.cardBg, border: 'none',
+              borderRadius: 14, fontSize: 16, color: t.text,
+              fontFamily: '-apple-system, system-ui', resize: 'none', height: 80,
+              outline: 'none', display: 'block',
+            }}
+          />
+        </div>
+
+        {/* Save */}
+        <div onClick={onSave} className="tap" style={{
+          background: t.accent, borderRadius: 14, padding: 17, textAlign: 'center',
+          fontSize: 17, fontWeight: 600, color: 'white', cursor: 'pointer',
+        }}>Save</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Screen: Add Habit ─────────────────────────────────────────────────────────
+function AddHabitScreen({ t, onBack, onSave, defaultPeriod }) {
+  const [title, setTitle]       = useState('');
+  const [subtitle, setSubtitle] = useState('');
+  const [period, setPeriod]     = useState(defaultPeriod || 'morning');
+  const valid = title.trim().length > 0;
+
+  const q = title.trim().toLowerCase();
+  const suggestions = q.length >= 2
+    ? LIBRARY_FLAT.filter(l => l.title.toLowerCase().includes(q)).slice(0, 4)
+    : [];
+
+  function handleSave() {
+    if (!valid) return;
+    const id = 'custom_' + Math.random().toString(36).slice(2, 9);
+    onSave({ id, title: title.trim(), subtitle: subtitle.trim(), time: period });
+  }
+
+  return (
+    <div className="fade-up" style={{ paddingBottom: 28 }}>
+      {/* Nav */}
+      <div style={{ display: 'flex', alignItems: 'center', padding: '10px 16px', borderBottom: `0.5px solid ${t.separator}` }}>
+        <div onClick={onBack} className="tap" style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.accent, cursor: 'pointer', minWidth: 70 }}>
+          <svg width="10" height="18" viewBox="0 0 10 18" fill="none"><path d="M9 1L1.5 9 9 17" stroke={t.accent} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          <span style={{ fontSize: 17 }}>Back</span>
+        </div>
+        <div style={{ flex: 1, textAlign: 'center', fontSize: 17, fontWeight: 600, color: t.text, letterSpacing: -0.3 }}>New Habit</div>
+        <div style={{ minWidth: 70 }} />
+      </div>
+
+      <div style={{ padding: '20px 16px 0' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Name</div>
+        <input
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          placeholder="e.g. Drink 2L of water"
+          autoFocus
+          style={{
+            width: '100%', padding: '13px 16px', background: t.cardBg,
+            border: `1.5px solid ${valid ? t.accentBord : t.separator}`,
+            borderRadius: 14, fontSize: 16, color: t.text,
+            fontFamily: '-apple-system, system-ui', outline: 'none',
+            display: 'block', marginBottom: suggestions.length ? 8 : 16, transition: 'border-color 0.2s',
+            WebkitAppearance: 'none',
+          }}
+        />
+
+        {suggestions.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            {suggestions.map(s => (
+              <div key={s.id} onClick={() => { setTitle(s.title); setPeriod(s.time); }} className="tap-bg" style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderRadius: 10, cursor: 'pointer',
+              }}>
+                <span style={{ fontSize: 14, color: t.accent }}>＋</span>
+                <span style={{ fontSize: 14, color: t.text }}>{s.title}</span>
+                <span style={{ fontSize: 12, color: t.textTer, marginLeft: 'auto' }}>{PERIODS.find(p => p.key === s.time)?.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ fontSize: 13, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+          Description <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(optional)</span>
+        </div>
+        <input
+          value={subtitle}
+          onChange={e => setSubtitle(e.target.value)}
+          placeholder="e.g. Hydration goal"
+          style={{
+            width: '100%', padding: '13px 16px', background: t.cardBg,
+            border: `1.5px solid ${t.separator}`,
+            borderRadius: 14, fontSize: 16, color: t.text,
+            fontFamily: '-apple-system, system-ui', outline: 'none',
+            display: 'block', marginBottom: 22,
+            WebkitAppearance: 'none',
+          }}
+        />
+
+        <div style={{ fontSize: 13, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Time of day</div>
+        <div style={{ background: t.card2Bg, borderRadius: 12, padding: 3, display: 'flex', gap: 2, marginBottom: 28 }}>
+          {PERIODS.map(p => {
+            const on = period === p.key;
+            return (
+              <div key={p.key} onClick={() => setPeriod(p.key)} style={{
+                flex: 1, padding: '10px 4px', borderRadius: 9, textAlign: 'center',
+                fontSize: 14, fontWeight: 500, background: on ? t.cardBg : 'transparent',
+                color: on ? t.text : t.textSec, cursor: 'pointer',
+                boxShadow: on ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', transition: 'background 0.15s',
+              }}>{p.emoji} {p.label}</div>
+            );
+          })}
+        </div>
+
+        <div
+          onClick={handleSave}
+          className={valid ? 'tap' : ''}
+          style={{
+            background: valid ? t.accent : t.separator,
+            borderRadius: 14, padding: 17, textAlign: 'center',
+            fontSize: 17, fontWeight: 600, color: 'white',
+            cursor: valid ? 'pointer' : 'default', transition: 'background 0.2s',
+          }}
+        >
+          Add Habit
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Screen: Manage Habits ─────────────────────────────────────────────────────
+const periodLabel = key => { const p = PERIODS.find(p => p.key === key); return p ? `${p.emoji} ${p.label}` : ''; };
+
+function ManageHabitsScreen({ t, builtInList, customHabits, onBack, onAdd, onDelete }) {
+  return (
+    <div className="fade-up" style={{ paddingBottom: 28 }}>
+      {/* Nav */}
+      <div style={{ display: 'flex', alignItems: 'center', padding: '10px 16px', borderBottom: `0.5px solid ${t.separator}` }}>
+        <div onClick={onBack} className="tap" style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.accent, cursor: 'pointer', minWidth: 70 }}>
+          <svg width="10" height="18" viewBox="0 0 10 18" fill="none"><path d="M9 1L1.5 9 9 17" stroke={t.accent} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          <span style={{ fontSize: 17 }}>Back</span>
+        </div>
+        <div style={{ flex: 1, textAlign: 'center', fontSize: 17, fontWeight: 600, color: t.text, letterSpacing: -0.3 }}>Manage Habits</div>
+        <div onClick={onAdd} className="tap" style={{ color: t.accent, cursor: 'pointer', fontSize: 17, fontWeight: 500, minWidth: 70, textAlign: 'right' }}>+ Add</div>
+      </div>
+
+      <div style={{ padding: '18px 16px 0' }}>
+        {/* Built-in section */}
+        <div style={{ fontSize: 13, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8, paddingLeft: 4 }}>Built-in</div>
+        <div style={{ background: t.cardBg, borderRadius: 20, overflow: 'hidden', marginBottom: 22 }}>
+          {builtInList.map((h, i) => (
+            <div key={h.id} style={{
+              display: 'flex', alignItems: 'center', padding: '13px 16px', gap: 12,
+              borderBottom: i < builtInList.length - 1 ? `0.5px solid ${t.separator}` : 'none',
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 16, fontWeight: 500, color: t.text }}>{h.title}</div>
+                <div style={{ fontSize: 12, color: t.textSec, marginTop: 1 }}>{h.subtitle}</div>
+              </div>
+              <div style={{ fontSize: 12, color: t.textTer, flexShrink: 0 }}>{periodLabel(h.time)}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Custom section */}
+        <div style={{ fontSize: 13, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8, paddingLeft: 4 }}>Your habits</div>
+        {customHabits.length === 0 ? (
+          <div onClick={onAdd} className="tap" style={{
+            background: t.cardBg, borderRadius: 20, padding: '22px 16px',
+            textAlign: 'center', cursor: 'pointer',
+            border: `1.5px dashed ${t.separator}`,
+          }}>
+            <div style={{ fontSize: 15, color: t.textSec }}>No custom habits yet</div>
+            <div style={{ fontSize: 15, color: t.accent, marginTop: 6, fontWeight: 500 }}>+ Add your first habit</div>
+          </div>
+        ) : (
+          <>
+            <div style={{ background: t.cardBg, borderRadius: 20, overflow: 'hidden' }}>
+              {customHabits.map((h, i) => (
+                <div key={h.id} style={{
+                  display: 'flex', alignItems: 'center', padding: '13px 16px', gap: 12,
+                  borderBottom: i < customHabits.length - 1 ? `0.5px solid ${t.separator}` : 'none',
+                }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 16, fontWeight: 500, color: t.text }}>{h.title}</div>
+                    <div style={{ fontSize: 12, color: t.textSec, marginTop: 1 }}>{periodLabel(h.time || 'morning')}{h.subtitle ? ` · ${h.subtitle}` : ''}</div>
+                  </div>
+                  <div onClick={() => onDelete(h.id)} className="tap" style={{ padding: '4px 8px', cursor: 'pointer' }}>
+                    <svg width="18" height="20" viewBox="0 0 18 20" fill="none">
+                      <path d="M1 5h16M6 5V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M7 9v7M11 9v7M2 5l1 13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1L16 5H2z" stroke="#FF3B30" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div onClick={onAdd} className="tap" style={{
+              marginTop: 12, background: t.accentBg, border: `1px solid ${t.accentBord}`,
+              borderRadius: 14, padding: '14px 16px', textAlign: 'center', cursor: 'pointer',
+            }}>
+              <span style={{ fontSize: 15, fontWeight: 500, color: t.accent }}>+ Add another habit</span>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Build the current week from local data (real logged data, offline-safe) ────
+function buildLocalWeek() {
+  const today = new Date(), wd = today.getDay();
+  const mon = new Date(today); mon.setDate(today.getDate() - (wd === 0 ? 6 : wd - 1));
+  const DAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+  const out = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(mon); d.setDate(mon.getDate() + i);
+    const key = d.toISOString().slice(0, 10);
+    const h = loadLocalHabits(key) || {};
+    const custom = {};
+    Object.keys(h).forEach(k => { if (k.startsWith('custom_')) custom[k] = !!h[k]; });
+    out.push({
+      d: DAYS[i], date: key,
+      b: (!!h.breakfast || !!h.fasting), f: (h.fruitVeg || 0) >= 2, a: h.activity || 0,
+      nb: !!h.noFoodBeforeBed, ns: !!h.noNightSnacking, s: !!h.brokeUpSitting,
+      feel: dailyScore(h.emotions), ...custom,
+    });
+  }
+  return out;
+}
+
+const weekHasData = wd => wd.some(d =>
+  (d.a || 0) > 0 || d.b || d.f || d.nb || d.ns || d.s || d.feel != null ||
+  Object.keys(d).some(k => k.startsWith('custom_') && d[k])
+);
+
+// ── Screen: Weekly review ─────────────────────────────────────────────────────
+function WeeklyScreen({ t, weekRange, weekData, weeklyReview, loading, customHabits, fasting }) {
+  const wd       = weekData && weekData.length > 0 ? weekData : [];
+  const hasData  = wd.length > 0 && weekHasData(wd);
+  const totalAct = wd.reduce((s, d) => s + (d.a || 0), 0);
+  const actPct   = Math.min(100, Math.round(totalAct / 150 * 100)) + '%';
+
+  // Daily feeling scores
+  const feelDays = wd.map(d => (typeof d.feel === 'number' ? d.feel : null));
+  const feelVals = feelDays.filter(v => v != null);
+  const feelAvg  = feelVals.length ? Math.round((feelVals.reduce((a, b) => a + b, 0) / feelVals.length) * 10) / 10 : null;
+
+  // Empty state: no data logged this week yet.
+  if (wd.length === 0 || !hasData) {
+    return (
+      <div className="fade-up" style={{ paddingBottom: 24 }}>
+        <div style={{ padding: '18px 16px 0' }}>
+          <div style={{ fontSize: 28, fontWeight: 700, color: t.text, letterSpacing: -0.5 }}>Week</div>
+          <div style={{ fontSize: 15, color: t.textSec, marginTop: 3 }}>{weekRange}</div>
+        </div>
+        <div style={{ padding: '40px 16px 0' }}>
+          <div style={{ background: t.cardBg, borderRadius: 20, padding: '40px 24px', textAlign: 'center' }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>📊</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: t.text, letterSpacing: -0.3 }}>
+              {wd.length === 0 ? 'Loading your week…' : 'Nothing logged yet'}
+            </div>
+            <div style={{ fontSize: 14, color: t.textSec, marginTop: 8, lineHeight: 1.5 }}>
+              {wd.length === 0
+                ? 'Fetching this week’s habit data.'
+                : 'Log a habit and rate how you feel — your weekly trends and AI insight will build here through the week.'}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const mkRow = (label, fn) => ({
+    label, score: wd.filter(fn).length,
+    days: wd.map(d => ({ c: fn(d) ? t.accent : t.emptyDot })),
+  });
+  const habitRows = [
+    mkRow(fasting ? 'Fasting' : 'Breakfast', d => d.b),
+    mkRow('Fruit & veg',   d => d.f),
+    mkRow('30 min active', d => d.a >= 30),
+    mkRow('No food/bed',   d => d.nb),
+    mkRow('No night snk.', d => d.ns),
+    mkRow('Broke sitting', d => d.s),
+    ...(customHabits || []).map(h => mkRow(
+      h.title.length > 12 ? h.title.slice(0, 11) + '…' : h.title,
+      d => !!d[h.id]
+    )),
+  ];
+
+  return (
+    <div className="fade-up" style={{ paddingBottom: 24 }}>
+      <div style={{ padding: '18px 16px 0' }}>
+        <div style={{ fontSize: 28, fontWeight: 700, color: t.text, letterSpacing: -0.5 }}>Week</div>
+        <div style={{ fontSize: 15, color: t.textSec, marginTop: 3 }}>{weekRange}</div>
+      </div>
+
+      {/* How you felt */}
+      <div style={{ padding: '16px 16px 0' }}>
+        <div style={{ background: t.cardBg, borderRadius: 20, padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: t.text }}>How you felt</div>
+            <div style={{ fontSize: 13, color: t.accent, fontWeight: 600 }}>{feelAvg != null ? `${feelAvg} / 5 avg` : 'No data'}</div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 72 }}>
+            {wd.map((d, i) => {
+              const v = feelDays[i];
+              const h = v != null ? Math.max(6, Math.round((v / 5) * 72)) : 4;
+              const col = v != null ? feelOf(Math.round(v)).color : t.emptyDot;
+              return (
+                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                  <div style={{ fontSize: 10, color: t.textTer, marginBottom: 3, lineHeight: 1 }}>{v != null ? v : '·'}</div>
+                  <div style={{ width: '100%', background: col, borderRadius: '4px 4px 0 0', height: h, transition: 'height 0.3s' }} />
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 5 }}>
+            {wd.map((d, i) => <div key={i} style={{ flex: 1, textAlign: 'center', fontSize: 11, color: t.textSec }}>{d.d}</div>)}
+          </div>
+        </div>
+      </div>
+
+      {/* Habit grid */}
+      <div style={{ padding: '14px 16px 0' }}>
+        <div style={{ background: t.cardBg, borderRadius: 20, padding: '16px 14px' }}>
+          <div style={{ display: 'flex', marginBottom: 10, marginLeft: 100 }}>
+            {wd.map((d, i) => (
+              <div key={i} style={{ flex: 1, textAlign: 'center', fontSize: 11, fontWeight: 600, color: t.textSec }}>{d.d}</div>
+            ))}
+          </div>
+          {habitRows.map((row, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', marginBottom: 9 }}>
+              <div style={{ width: 100, fontSize: 12, color: t.textSec, flexShrink: 0, paddingRight: 6, lineHeight: 1.3 }}>{row.label}</div>
+              <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between' }}>
+                {row.days.map((day, j) => <div key={j} style={{ width: 22, height: 22, borderRadius: '50%', background: day.c }} />)}
+              </div>
+              <div style={{ width: 30, textAlign: 'right', fontSize: 11, fontWeight: 600, color: t.accent, flexShrink: 0 }}>{row.score}/7</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Activity chart */}
+      <div style={{ padding: '14px 16px 0' }}>
+        <div style={{ background: t.cardBg, borderRadius: 20, padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: t.text }}>Activity</div>
+            <div style={{ fontSize: 13, color: t.accent, fontWeight: 500 }}>{totalAct} / 150 min goal</div>
+          </div>
+          <div style={{ height: 5, background: t.separator, borderRadius: 3, overflow: 'hidden', marginBottom: 14 }}>
+            <div style={{ height: '100%', width: actPct, background: t.accent, borderRadius: 3 }} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 72 }}>
+            {wd.map((d, i) => {
+              const h = Math.max(3, Math.round(((d.a || 0) / 60) * 72));
+              return (
+                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                  <div style={{ fontSize: 9, color: t.textTer, marginBottom: 3, lineHeight: 1 }}>{d.a > 0 ? d.a : '0'}</div>
+                  <div style={{ width: '100%', background: d.a >= 30 ? t.accent : t.emptyDot, borderRadius: '3px 3px 0 0', height: h }} />
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 5 }}>
+            {wd.map((d, i) => <div key={i} style={{ flex: 1, textAlign: 'center', fontSize: 11, color: t.textSec }}>{d.d}</div>)}
+          </div>
+        </div>
+      </div>
+
+      {/* AI Insight */}
+      <div style={{ padding: '14px 16px 0' }}>
+        <div style={{ background: t.accentBg, border: `1px solid ${t.accentBord}`, borderRadius: 20, padding: '18px 16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill={t.accent}><path d="M8 0L9.8 5.5H16L10.9 8.9 12.7 14.4 8 11 3.3 14.4 5.1 8.9 0 5.5H6.2z"/></svg>
+            <span style={{ fontSize: 15, fontWeight: 600, color: t.accent }}>Weekly Insight</span>
+          </div>
+          {loading ? (
+            <div style={{ fontSize: 14, color: t.textSec }}>Generating your review…</div>
+          ) : weeklyReview ? (
+            weeklyReview.split('\n\n').map((para, i) => (
+              <p key={i} style={{ fontSize: 14, lineHeight: 1.6, color: t.text, margin: i === 0 ? 0 : '12px 0 0' }}>{para}</p>
+            ))
+          ) : (
+            <div style={{ fontSize: 14, lineHeight: 1.6, color: t.textSec }}>
+              Keep logging habits and how you feel — your personalised AI insight appears once there’s enough from this week.
+            </div>
+          )}
+          {weeklyReview && (
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: `0.5px solid ${t.accentBord}`, fontSize: 12, color: t.textSec }}>
+              Generated from your 7-day habit log · refreshes Monday
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Screen: Settings ──────────────────────────────────────────────────────────
+function SettingsScreen({ t, darkMode, onToggleDark, onManageHabits, fasting, onToggleFasting }) {
+  return (
+    <div className="fade-up" style={{ paddingBottom: 28 }}>
+      <div style={{ padding: '18px 16px 14px' }}>
+        <div style={{ fontSize: 28, fontWeight: 700, color: t.text, letterSpacing: -0.5 }}>Settings</div>
+      </div>
+
+      <SectionHeader label="Habits" t={t} />
+      <div style={{ padding: '0 16px', marginBottom: 10 }}>
+        <div style={{ background: t.cardBg, borderRadius: 20, overflow: 'hidden' }}>
+          <SettingsRow label="Manage Habits" t={t} onClick={onManageHabits} />
+        </div>
+      </div>
+
+      <SectionHeader label="Eating" t={t} />
+      <div style={{ padding: '0 16px', marginBottom: 4 }}>
+        <div style={{ background: t.cardBg, borderRadius: 20, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', justifyContent: 'space-between', gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 17, color: t.text }}>Intermittent fasting</div>
+              <div style={{ fontSize: 12, color: t.textSec, marginTop: 2, lineHeight: 1.35 }}>Skipping breakfast counts as a win — your morning habit becomes “held fasting window”.</div>
+            </div>
+            <Toggle on={fasting} onToggle={onToggleFasting} accent={t.accent} separator={t.separator} />
+          </div>
+        </div>
+      </div>
+
+      <SectionHeader label="Appearance" t={t} />
+      <div style={{ padding: '0 16px', marginBottom: 10 }}>
+        <div style={{ background: t.cardBg, borderRadius: 20, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', justifyContent: 'space-between' }}>
+            <span style={{ fontSize: 17, color: t.text }}>Dark Mode</span>
+            <Toggle on={darkMode} onToggle={onToggleDark} accent={t.accent} separator={t.separator} />
+          </div>
+        </div>
+      </div>
+
+      <SectionHeader label="Data" t={t} />
+      <div style={{ padding: '0 16px', marginBottom: 10 }}>
+        <div style={{ background: t.cardBg, borderRadius: 20, overflow: 'hidden' }}>
+          <SettingsRow label="Export Data" t={t} borderBottom />
+          <SettingsRow label="Connect Apple Health" t={t} />
+        </div>
+      </div>
+
+      <div style={{ padding: 16, textAlign: 'center', fontSize: 13, color: t.textTer }}>Habit Tracker · v1.1</div>
+    </div>
+  );
+}
+
+function SectionHeader({ label, t }) {
+  return (
+    <div style={{ fontSize: 13, fontWeight: 600, color: t.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8, paddingLeft: 20 }}>{label}</div>
+  );
+}
+
+function SettingsRow({ label, t, onClick, borderBottom }) {
+  return (
+    <div onClick={onClick} className={onClick ? 'tap-bg' : ''} style={{
+      display: 'flex', alignItems: 'center', padding: '14px 16px', cursor: onClick ? 'pointer' : 'default',
+      borderBottom: borderBottom ? `0.5px solid ${t.separator}` : 'none',
+    }}>
+      <div style={{ flex: 1, fontSize: 17, color: t.text }}>{label}</div>
+      <Chevron color={t.textTer} />
+    </div>
+  );
+}
+
+// ── TabBar ────────────────────────────────────────────────────────────────────
+function TabBar({ t, screen, activeTab, onHome, onWeekly, onSettings }) {
+  const Tab = ({ active, icon, label, onClick }) => (
+    <div onClick={onClick} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, cursor: 'pointer', color: active ? t.accent : t.inactiveT }}>
+      {icon}
+      <span style={{ fontSize: 10, fontWeight: 500, letterSpacing: -0.1 }}>{label}</span>
+    </div>
+  );
+  const tab         = activeTab || screen;
+  const tabHome     = tab === 'home' || tab === 'log';
+  const tabWeekly   = tab === 'weekly';
+  const tabSettings = tab === 'settings' || tab === 'manage-habits';
+  const c = (active) => active ? t.accent : t.inactiveT;
+
+  return (
+    <div style={{ height: 83, background: t.tabBg, borderTop: `0.5px solid ${t.separator}`, display: 'flex', alignItems: 'flex-start', paddingTop: 10, flexShrink: 0 }}>
+      <Tab active={tabHome} onClick={onHome} label="Today" icon={
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+          <path d="M3 10.5L12 3l9 7.5V21H15v-6H9v6H3V10.5z" fill={tabHome ? t.accent : 'none'} stroke={c(tabHome)} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      } />
+      <Tab active={tabWeekly} onClick={onWeekly} label="Week" icon={
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={c(tabWeekly)} strokeWidth="1.8" strokeLinecap="round">
+          <rect x="3" y="4" width="18" height="17" rx="3"/><path d="M3 9h18"/><path d="M8 2v4M16 2v4"/>
+        </svg>
+      } />
+      <Tab active={tabSettings} onClick={onSettings} label="Settings" icon={
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={c(tabSettings)} strokeWidth="1.6" strokeLinecap="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M12 2v2.5M12 19.5V22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M2 12h2.5M19.5 12H22M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77"/>
+        </svg>
+      } />
+    </div>
+  );
+}
+
+// ── Root App ──────────────────────────────────────────────────────────────────
+function App() {
+  const [screen,   setScreen]   = useState('home');
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem('ht_dark') === 'true');
+  const [fasting,  setFasting]  = useState(() => localStorage.getItem('ht_fasting') === 'true');
+  const [logType,  setLogType]  = useState('meal');
+  const [showSaved, setShowSaved] = useState(false);
+  const addHabitFrom = useRef('manage-habits');
+  const [time,     setTime]     = useState(getTime);
+  const dateStr   = useRef(getDateStr()).current;
+  const greeting  = useRef(getGreeting()).current;
+  const weekRange = useRef(getWeekRange()).current;
+
+  const [habits, setHabits] = useState({
+    breakfast: false, fasting: false, fruitVeg: 0, activity: 0,
+    noFoodBeforeBed: false, noNightSnacking: false, brokeUpSitting: false,
+    steps: null, kcal: null,
+  });
+  const [customHabits, setCustomHabits] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('ht_custom_habits') || '[]'); }
+    catch (_) { return []; }
+  });
+  const [logForm, setLogForm] = useState({ mealType: 'lunch', quality: 'balanced', fruitVeg: true, notes: '' });
+  const [weekData, setWeekData] = useState([]);
+  const [weeklyReview, setWeeklyReview] = useState(null);
+  const [weeklyLoading, setWeeklyLoading] = useState(false);
+  const [feelingSheet, setFeelingSheet] = useState(null);   // { mode, habitId, title, current }
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [yHabits, setYHabits] = useState(null);             // yesterday's full record (for follow-up)
+  const addHabitPeriod = useRef('morning');
+
+  const builtInList = useMemo(() => builtIns(fasting), [fasting]);
+  const emotions = habits.emotions || {};
+  const score = dailyScore(emotions);
+  const scoreCount = Object.values(emotions).filter(v => typeof v === 'number').length;
+  const yFollowUp = (yHabits && yHabits.followUp) || {};
+  const followUpItems = yHabits
+    ? [
+        ...builtInList.filter(b => b.tappable && b.done(yHabits)),
+        ...customHabits.filter(c => !!yHabits[c.id]),
+      ].map(h => ({ id: h.id, title: h.title }))
+    : [];
+
+  // Active (tappable) habits for the quick-log sheet
+  const activeHabits = [
+    ...builtInList.filter(b => b.tappable).map(b => ({
+      id: b.id, title: b.title, subtitle: b.subtitle, time: b.time, done: b.done(habits),
+    })),
+    ...customHabits.map(h => ({
+      id: h.id, title: h.title, subtitle: h.subtitle, time: h.time || 'morning', done: !!habits[h.id],
+    })),
+  ];
+
+  const t = th(darkMode);
+
+  // Clock
+  useEffect(() => {
+    const id = setInterval(() => setTime(getTime()), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Persist prefs
+  useEffect(() => { localStorage.setItem('ht_dark', darkMode); }, [darkMode]);
+  useEffect(() => { localStorage.setItem('ht_fasting', fasting); }, [fasting]);
+
+  // Load today's + yesterday's data (API first, localStorage fallback)
+  useEffect(() => {
+    (async () => {
+      const local = loadLocalHabits(getTodayKey());
+      if (local) setHabits(h => ({ ...h, ...local }));
+      try {
+        const res = await fetch(`/api/habits?date=${getTodayKey()}`);
+        if (res.ok) { const d = await res.json(); if (d.habits) setHabits(h => ({ ...h, ...d.habits })); }
+      } catch (_) {}
+
+      const yKey  = dayKey(-1);
+      let yData   = loadLocalHabits(yKey);
+      try {
+        const res = await fetch(`/api/habits?date=${yKey}`);
+        if (res.ok) { const d = await res.json(); if (d.habits) yData = { ...(yData || {}), ...d.habits }; }
+      } catch (_) {}
+      setYHabits(yData);
+    })();
+  }, []);
+
+  // Load weekly data — seed from real local data immediately, then merge server (source of truth).
+  useEffect(() => {
+    if (screen !== 'weekly') return;
+    (async () => {
+      const local = buildLocalWeek();
+      setWeekData(local);                 // show real, locally-logged data right away
+
+      let merged = local;
+      try {
+        const res = await fetch('/api/weekly');
+        if (res.ok) {
+          const d = await res.json();
+          if (d.weekData && d.weekData.length) {
+            // Prefer server values; fall back to local for feeling/custom keys it doesn't have.
+            merged = d.weekData.map((sd, i) => ({
+              ...local[i], ...sd,
+              feel: (sd.feel != null) ? sd.feel : (local[i] ? local[i].feel : null),
+            }));
+            setWeekData(merged);
+          }
+          if (d.review) { setWeeklyReview(d.review); return; }
+        }
+
+        if (!weekHasData(merged)) { setWeeklyReview(null); return; }
+        setWeeklyLoading(true);
+        const r2 = await fetch('/api/weekly-review', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ weekData: merged }),
+        });
+        if (r2.ok) { const rd = await r2.json(); setWeeklyReview(rd.review); }
+      } catch (_) {
+        // Offline: keep the locally-built week; no fabricated review.
+        setWeeklyReview(null);
+      } finally { setWeeklyLoading(false); }
+    })();
+  }, [screen === 'weekly' ? 'weekly' : null]);
+
+  async function persistHabits(next, date = getTodayKey()) {
+    saveLocalHabits(date, next);
+    try {
+      await fetch('/api/habits', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date, habits: next }),
+      });
+    } catch (_) {}
+  }
+
+  // Tap a habit row: completed → clear it; not yet done → ask how it felt (1–5).
+  function onHabitTap(h) {
+    if (!h.tappable) return;
+    if (h.done) {
+      setHabits(prev => {
+        const nextEmo = { ...(prev.emotions || {}) }; delete nextEmo[h.id];
+        const next = { ...prev, [h.id]: false, emotions: nextEmo };
+        persistHabits(next);
+        return next;
+      });
+    } else {
+      setFeelingSheet({ mode: 'today', habitId: h.id, title: h.title, current: emotions[h.id] });
+    }
+  }
+
+  // Save the feeling score chosen in the bottom sheet.
+  function saveFeeling(score) {
+    const sheet = feelingSheet;
+    if (!sheet) return;
+    if (sheet.mode === 'followup') {
+      setYHabits(prev => {
+        const base = prev || {};
+        const next = { ...base, followUp: { ...(base.followUp || {}), [sheet.habitId]: score } };
+        persistHabits(next, dayKey(-1));
+        return next;
+      });
+    } else {
+      setHabits(prev => {
+        const next = { ...prev, [sheet.habitId]: true, emotions: { ...(prev.emotions || {}), [sheet.habitId]: score } };
+        persistHabits(next);
+        return next;
+      });
+    }
+    setFeelingSheet(null);
+  }
+
+  function onFollowUpPick(item) {
+    setFeelingSheet({ mode: 'followup', habitId: item.id, title: item.title, current: yFollowUp[item.id] });
+  }
+
+  function saveCustomHabits(next) {
+    localStorage.setItem('ht_custom_habits', JSON.stringify(next));
+    setCustomHabits(next);
+  }
+
+  function openAddHabit(from, period) {
+    addHabitFrom.current = from;
+    addHabitPeriod.current = period || 'morning';
+    setScreen('add-habit');
+  }
+
+  function addCustomHabit(habit) {
+    saveCustomHabits([...customHabits, habit]);
+    setScreen(addHabitFrom.current === 'home' ? 'home' : 'manage-habits');
+  }
+
+  function deleteCustomHabit(id) {
+    saveCustomHabits(customHabits.filter(h => h.id !== id));
+    setHabits(h => {
+      const next = { ...h };
+      delete next[id];
+      const nextEmo = { ...(next.emotions || {}) }; delete nextEmo[id];
+      next.emotions = nextEmo;
+      persistHabits(next);
+      return next;
+    });
+  }
+
+  // Quick-log: create a new habit on the fly (from the sheet's "Create …").
+  function quickCreate(item) {
+    const builtinIds = new Set(builtInList.map(b => b.id));
+    if (!builtinIds.has(item.id) && !customHabits.some(c => c.id === item.id)) {
+      saveCustomHabits([...customHabits, { id: item.id, title: item.title, subtitle: item.subtitle || '', time: item.time || 'morning' }]);
+    }
+  }
+
+  // Quick-log: a habit was selected and rated → record it (and persist if from library).
+  function quickLog(item, score) {
+    const builtinIds = new Set(builtInList.map(b => b.id));
+    if (item.persist && !builtinIds.has(item.id) && !customHabits.some(c => c.id === item.id)) {
+      saveCustomHabits([...customHabits, { id: item.id, title: item.title, subtitle: item.subtitle || '', time: item.time || 'morning' }]);
+    }
+    setHabits(prev => {
+      const next = { ...prev, [item.id]: true, emotions: { ...(prev.emotions || {}), [item.id]: score } };
+      persistHabits(next);
+      return next;
+    });
+    setQuickOpen(false);
+    setShowSaved(true);
+    setTimeout(() => setShowSaved(false), 2800);
+  }
+
+  async function handleSave() {
+    setHabits(h => {
+      const nextFv  = logForm.fruitVeg ? Math.min(2, (h.fruitVeg || 0) + 1) : h.fruitVeg;
+      // In fasting mode, eating breakfast does NOT auto-complete the morning habit.
+      const nextBrk = (!fasting && logType === 'meal' && logForm.mealType === 'breakfast') ? true : h.breakfast;
+      const next    = { ...h, fruitVeg: nextFv, breakfast: nextBrk };
+      persistHabits(next);
+      return next;
+    });
+    try {
+      await fetch('/api/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: getTodayKey(), logType, ...logForm, timestamp: new Date().toISOString() }),
+      });
+    } catch (_) {}
+    setLogForm({ mealType: 'lunch', quality: 'balanced', fruitVeg: true, notes: '' });
+    setScreen('home');
+    setShowSaved(true);
+    setTimeout(() => setShowSaved(false), 2800);
+  }
+
+  return (
+    <div style={{ position: 'relative', flexShrink: 0 }}>
+      <IOSDevice dark={darkMode}>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: t.bg }}>
+          <div style={{ height: 62, flexShrink: 0 }} />
+          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            {screen === 'home'          && <HomeScreen         t={t} habits={habits} builtInList={builtInList} onHabitTap={onHabitTap} greeting={greeting} dateStr={dateStr} weekRange={weekRange} onQuickLog={() => setQuickOpen(true)} onLogMeal={() => { setLogType('meal');  setScreen('log'); }} onLogSnack={() => { setLogType('snack'); setScreen('log'); }} onWeekly={() => setScreen('weekly')} showSaved={showSaved} customHabits={customHabits} onAddHabit={(period) => openAddHabit('home', period)} emotions={emotions} followUpItems={followUpItems} followUp={yFollowUp} onFollowUpPick={onFollowUpPick} score={score} scoreCount={scoreCount} />}
+            {screen === 'log'           && <LogScreen          t={t} logType={logType} logForm={logForm} setLogForm={setLogForm} onBack={() => setScreen('home')} onSave={handleSave} time={time} />}
+            {screen === 'weekly'        && <WeeklyScreen       t={t} weekRange={weekRange} weekData={weekData} weeklyReview={weeklyReview} loading={weeklyLoading} customHabits={customHabits} fasting={fasting} />}
+            {screen === 'settings'      && <SettingsScreen     t={t} darkMode={darkMode} onToggleDark={() => setDarkMode(d => !d)} onManageHabits={() => setScreen('manage-habits')} fasting={fasting} onToggleFasting={() => setFasting(f => !f)} />}
+            {screen === 'manage-habits' && <ManageHabitsScreen t={t} builtInList={builtInList} customHabits={customHabits} onBack={() => setScreen('settings')} onAdd={() => openAddHabit('manage-habits')} onDelete={deleteCustomHabit} />}
+            {screen === 'add-habit'     && <AddHabitScreen     t={t} onBack={() => setScreen(addHabitFrom.current)} onSave={addCustomHabit} defaultPeriod={addHabitPeriod.current} />}
+          </div>
+          {(
+            <TabBar t={t} screen={screen}
+              activeTab={screen === 'add-habit' ? addHabitFrom.current : screen}
+              onHome={() => setScreen('home')}
+              onWeekly={() => setScreen('weekly')}
+              onSettings={() => setScreen('settings')}
+            />
+          )}
+        </div>
+        <FeelingSheet t={t} sheet={feelingSheet} onClose={() => setFeelingSheet(null)} onSave={saveFeeling} />
+        <QuickLogSheet t={t} open={quickOpen} onClose={() => setQuickOpen(false)} activeHabits={activeHabits} onLog={quickLog} onCreate={quickCreate} />
+      </IOSDevice>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

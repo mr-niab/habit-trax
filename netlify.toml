@@ -1,0 +1,13 @@
+[build]
+  publish = "."
+
+[functions]
+  node_bundler = "esbuild"
+
+# Serve index.html for all non-API, non-asset routes (SPA fallback).
+# Netlify automatically serves real files (assets, /api/* functions) before
+# applying this catch-all, so it only affects unknown client-side routes.
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
